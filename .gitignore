@@ -1,0 +1,9 @@
+backups/
+logs/
+temp_conv/
+.agents/
+.vscode/
+*.zip
+*.sql
+*.log
+core/debug_upload.txt

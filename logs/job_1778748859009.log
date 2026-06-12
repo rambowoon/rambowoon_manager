@@ -1,0 +1,8 @@
+{"status":"info","log":"\ud83d\udee0\ufe0f Kh\u1edfi t\u1ea1o c\u1ea5u h\u00ecnh b\u1ea3o m\u1eadt..."}
+{"status":"info","log":"\u2601\ufe0f \u0110ang kh\u1edfi t\u1ea1o Cloudflare Turnstile Widget cho bunbohuety.com"}
+{"status":"info","log":"\u274c L\u1ed7i khi g\u1ecdi API Cloudflare (Ki\u1ec3m tra l\u1ea1i Token\/Account ID)."}
+{"status":"info","log":"\ud83d\udee0\ufe0f C\u1ea5u h\u00ecnh DB\/Email tr\u00ean DirectAdmin..."}
+{"status":"info","log":"> Database: OK"}
+{"status":"info","log":"> Email noreply: error=1&text=Unable%20to%20create%20email%20account&details=Password%20must%20contain%20at%20least%20one%20number%2C%20uppercase%20and%20lowercase%20letter%3Cbr%3E%0A"}
+{"status":"info","log":"\ud83d\ude80 \u0110\u1ed3ng b\u1ed9 Bridge v\u00e0 Cloud Transfer..."}
+{"status":"success","message":"Cloud transfer & Full Setup ho\u00e0n t\u1ea5t!"}

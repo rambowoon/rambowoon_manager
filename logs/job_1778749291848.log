@@ -1,0 +1,9 @@
+{"status":"info","log":"\ud83d\udee0\ufe0f Kh\u1edfi t\u1ea1o c\u1ea5u h\u00ecnh b\u1ea3o m\u1eadt..."}
+{"status":"info","log":"\u2601\ufe0f \u0110ang kh\u1edfi t\u1ea1o Cloudflare Turnstile Widget cho bunbohuety.com"}
+{"status":"info","log":"\u274c L\u1ed7i Cloudflare: Could not route to \/accounts\/e423a5476eb1bac84f61a15e84e895fc\/turnstile\/v1\/widgets, perhaps your object identifier is invalid?"}
+{"status":"info","log":"\ud83d\udee0\ufe0f C\u1ea5u h\u00ecnh DB\/Email tr\u00ean DirectAdmin..."}
+{"status":"info","log":"\ud83d\udd04 \u0110\u00e3 t\u1ea1o l\u1ea1i m\u1eadt kh\u1ea9u m\u1edbi m\u1ea1nh h\u01a1n \u0111\u1ec3 kh\u1edbp y\u00eau c\u1ea7u DirectAdmin."}
+{"status":"info","log":"> Database: OK"}
+{"status":"info","log":"> Email noreply: OK"}
+{"status":"info","log":"\ud83d\ude80 \u0110\u1ed3ng b\u1ed9 Bridge v\u00e0 Cloud Transfer..."}
+{"status":"success","message":"Cloud transfer & Full Setup ho\u00e0n t\u1ea5t!"}

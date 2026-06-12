@@ -1,0 +1,9 @@
+{
+    "json.schemas": [],
+    "[php]": {
+        "editor.defaultFormatter": "DEVSENSE.phptools-vscode"
+    },
+    "[blade]": {
+        "editor.defaultFormatter": "shufo.vscode-blade-formatter"
+    }
+}
