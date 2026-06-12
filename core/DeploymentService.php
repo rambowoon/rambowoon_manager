@@ -39,7 +39,7 @@ class DeploymentService
             $exe7z = $this->get7zExecutable();
             if ($exe7z) {
                 $exclude = '-xr!".agents" -xr!"thumbs" -xr!"watermarks" -xr!"caches" -xr!"dist.zip" -xr!"dist.sql" -xr!"vite.config.js" -xr!"README.md" -xr!".gitignore"';
-                $cmd = "cd /d \"$projectPath\" && $exe7z a -tzip -mx=9 \"$zipFile\" $exclude .";
+                $cmd = "cd /d \"$projectPath\" && $exe7z a -tzip -mx=9 -bsp1 \"$zipFile\" $exclude .";
                 $returnVar = $this->runCommandWithProgress($cmd, $zipFile, $jobId);
                 if ($returnVar === 0 && is_file($zipFile) && filesize($zipFile) > 0) {
                     $finalSize = $this->formatBytes(filesize($zipFile));
@@ -48,21 +48,65 @@ class DeploymentService
                     }
                     return true;
                 }
+            } else {
+                if ($jobId && function_exists('writeJobLog')) {
+                    writeJobLog($jobId, ['status' => 'info', 'log' => "⚠️ Không tìm thấy lệnh 7z trong PATH hoặc Program Files."]);
+                }
             }
         }
 
-        // Fallback to standard tar
-        $exclude = '--exclude=".agents" --exclude="thumbs" --exclude="watermarks" --exclude="caches" --exclude="dist.zip" --exclude="dist.sql" --exclude="vite.config.js" --exclude="README.md" --exclude=".gitignore"';
-        $cmd = "cd /d \"$projectPath\" && tar -a -c -f \"$zipFile\" $exclude .";
-        $returnVar = $this->runCommandWithProgress($cmd, $zipFile, $jobId);
-        if ($returnVar !== 0) return false;
-        if (!is_file($zipFile) || filesize($zipFile) <= 0) return false;
-        
-        $finalSize = $this->formatBytes(filesize($zipFile));
-        if ($jobId && function_exists('writeJobLog')) {
-            writeJobLog($jobId, ['status' => 'info', 'log' => "✅ Nén thành công! Dung lượng cuối cùng: $finalSize"]);
+        // Fallback to PHP ZipArchive
+        if (class_exists('ZipArchive')) {
+            if ($jobId && function_exists('writeJobLog')) {
+                writeJobLog($jobId, ['status' => 'info', 'log' => "⚠️ Không sử dụng hoặc lỗi 7-Zip. Đang nén bằng PHP ZipArchive..."]);
+            }
+            $zip = new \ZipArchive();
+            if ($zip->open($zipFile, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) === true) {
+                $files = new \RecursiveIteratorIterator(
+                    new \RecursiveDirectoryIterator($projectPath, \RecursiveDirectoryIterator::SKIP_DOTS),
+                    \RecursiveIteratorIterator::LEAVES_ONLY
+                );
+                
+                $excludes = ['.agents', 'thumbs', 'watermarks', 'caches', 'dist.zip', 'dist.sql', 'vite.config.js', 'README.md', '.gitignore'];
+                $count = 0;
+                
+                foreach ($files as $name => $file) {
+                    if (!$file->isDir()) {
+                        $filePath = $file->getRealPath();
+                        $relativePath = substr($filePath, strlen($projectPath) + 1);
+                        $relativePathNormalized = str_replace('\\', '/', $relativePath);
+                        
+                        $skip = false;
+                        foreach ($excludes as $ex) {
+                            if (strpos($relativePathNormalized, $ex) === 0 || strpos($relativePathNormalized, '/' . $ex) !== false) {
+                                $skip = true;
+                                break;
+                            }
+                        }
+                        if ($skip) continue;
+                        
+                        $zip->addFile($filePath, $relativePathNormalized);
+                        $count++;
+                        if ($count % 500 === 0) {
+                            if ($jobId && function_exists('writeJobLog')) {
+                                writeJobLog($jobId, ['status' => 'info', 'log' => "📦 Đang nén bằng PHP... Đã thêm $count tệp..."]);
+                            }
+                        }
+                    }
+                }
+                
+                $zip->close();
+                if (is_file($zipFile) && filesize($zipFile) > 0) {
+                    $finalSize = $this->formatBytes(filesize($zipFile));
+                    if ($jobId && function_exists('writeJobLog')) {
+                        writeJobLog($jobId, ['status' => 'info', 'log' => "✅ Nén thành công bằng PHP ZipArchive! Dung lượng cuối cùng: $finalSize"]);
+                    }
+                    return true;
+                }
+            }
         }
-        return true;
+        
+        return false;
     }
 
     public function formatBytes($bytes, $precision = 2)
@@ -77,45 +121,109 @@ class DeploymentService
 
     private function runCommandWithProgress($cmd, $zipFile, $jobId)
     {
-        $process = proc_open($cmd, [
+        $stdoutFile = tempnam(sys_get_temp_dir(), 'cmd_out_');
+        $stderrFile = tempnam(sys_get_temp_dir(), 'cmd_err_');
+
+        $descriptors = [
             0 => ["pipe", "r"],
-            1 => ["pipe", "w"],
-            2 => ["pipe", "w"]
-        ], $pipes);
+            1 => ["file", $stdoutFile, "w"],
+            2 => ["file", $stderrFile, "w"]
+        ];
+
+        $process = proc_open($cmd, $descriptors, $pipes);
 
         if (is_resource($process)) {
-            stream_set_blocking($pipes[1], 0);
-            stream_set_blocking($pipes[2], 0);
+            $terminated = false;
+            register_shutdown_function(function() use ($process, &$terminated) {
+                if (!$terminated) {
+                    $status = proc_get_status($process);
+                    if ($status && $status['running']) {
+                        @proc_terminate($process);
+                    }
+                }
+            });
 
             $lastSize = 0;
             $lastLogTime = 0;
+            $lastPercent = '';
+            $stdout = '';
+            $stderr = '';
 
             while (true) {
                 $status = proc_get_status($process);
+
+                if (file_exists($stdoutFile)) {
+                    $stdout = (string)file_get_contents($stdoutFile);
+                }
+                if (file_exists($stderrFile)) {
+                    $stderr = (string)file_get_contents($stderrFile);
+                }
+
                 if (!$status['running']) {
                     break;
                 }
 
-                if (file_exists($zipFile)) {
-                    $currentSize = filesize($zipFile);
-                    $now = time();
-                    if ($currentSize !== $lastSize && ($now - $lastLogTime) >= 1) {
-                        $sizeStr = $this->formatBytes($currentSize);
+                $now = time();
+                
+                // 1. Try to get progress from 7z stdout
+                $progressPercent = null;
+                if (preg_match_all('/([0-9]{1,3})%/', $stdout, $matches)) {
+                    $progressPercent = end($matches[1]) . '%';
+                }
+
+                if ($progressPercent !== null) {
+                    if ($progressPercent !== $lastPercent && ($now - $lastLogTime) >= 1) {
                         if ($jobId && function_exists('writeJobLog')) {
-                            writeJobLog($jobId, ['status' => 'info', 'log' => "📦 Đang nén... Dung lượng hiện tại: $sizeStr"]);
+                            writeJobLog($jobId, ['status' => 'info', 'log' => "📦 Đang nén... Tiến trình: $progressPercent"]);
                         }
-                        $lastSize = $currentSize;
+                        $lastPercent = $progressPercent;
                         $lastLogTime = $now;
                     }
+                } else {
+                    // 2. Fallback to file size (e.g. for tar)
+                    clearstatcache(true, $zipFile);
+                    if (file_exists($zipFile)) {
+                        $currentSize = filesize($zipFile);
+                        if ($currentSize !== $lastSize && ($now - $lastLogTime) >= 1) {
+                            $sizeStr = $this->formatBytes($currentSize);
+                            if ($jobId && function_exists('writeJobLog')) {
+                                writeJobLog($jobId, ['status' => 'info', 'log' => "📦 Đang nén... Dung lượng hiện tại: $sizeStr"]);
+                            }
+                            $lastSize = $currentSize;
+                            $lastLogTime = $now;
+                        }
+                    }
                 }
-                usleep(300000); // 0.3 seconds
+                usleep(200000); // 0.2 seconds
             }
 
             fclose($pipes[0]);
-            fclose($pipes[1]);
-            fclose($pipes[2]);
-            return proc_close($process);
+            $terminated = true;
+            $exitCode = proc_close($process);
+
+            if (file_exists($stdoutFile)) {
+                $stdout = (string)file_get_contents($stdoutFile);
+                @unlink($stdoutFile);
+            }
+            if (file_exists($stderrFile)) {
+                $stderr = (string)file_get_contents($stderrFile);
+                @unlink($stderrFile);
+            }
+
+            if ($exitCode !== 0 && $jobId && function_exists('writeJobLog')) {
+                writeJobLog($jobId, ['status' => 'info', 'log' => "❌ Lệnh lỗi (Exit Code: $exitCode). Cmd: $cmd"]);
+                if (!empty($stdout)) {
+                    writeJobLog($jobId, ['status' => 'info', 'log' => "STDOUT: " . substr(trim($stdout), 0, 500)]);
+                }
+                if (!empty($stderr)) {
+                    writeJobLog($jobId, ['status' => 'info', 'log' => "STDERR: " . substr(trim($stderr), 0, 500)]);
+                }
+            }
+            return $exitCode;
         }
+
+        @unlink($stdoutFile);
+        @unlink($stderrFile);
         return -1;
     }
 
@@ -303,15 +411,19 @@ class DeploymentService
 
         // Nếu DA báo đã tồn tại, thực hiện cập nhật password để đảm bảo đồng bộ
         if ($isAlreadyExists) {
+            $daUserUrl = "https://{$daHost}:{$daPort}/CMD_API_DB_USER";
             $modifyData = [
-                'action' => 'passwd',
-                'db' => $mainUser . '_' . $dbSuffix,
+                'action' => 'modify',
+                'name' => $mainUser . '_' . $dbSuffix,
                 'user' => $mainUser . '_' . $dbSuffix,
                 'passwd' => $dbPass,
                 'passwd2' => $dbPass
             ];
-            $res = RemoteClient::post($daUrl, $modifyData, $auth);
-            // Trả về một chuỗi không chứa lỗi để api.php đi tiếp
+            $res = RemoteClient::post($daUserUrl, $modifyData, $auth);
+            if (strpos($res, 'error:0A00010B') !== false || strpos($res, 'wrong version number') !== false) {
+                $daUserUrl = "http://{$daHost}:{$daPort}/CMD_API_DB_USER";
+                $res = RemoteClient::post($daUserUrl, $modifyData, $auth);
+            }
             return "ok_already_exists"; 
         }
 
@@ -404,7 +516,8 @@ class DeploymentService
             ];
             $res = RemoteClient::post($url, [
                 'db_config' => json_encode($dbToPass),
-                'app_config' => json_encode($appConfigInfo)
+                'app_config' => json_encode($appConfigInfo),
+                'clear_db' => !empty($config['clear_db']) ? 1 : 0
             ]);
             $decoded = json_decode($res, true);
             if ($decoded && isset($decoded['status']) && $decoded['status'] !== 'error') return $res;
@@ -578,10 +691,10 @@ class DeploymentService
         $mainUser = !empty($config['da_user']) ? $config['da_user'] : $config['ftp_user'];
         $auth = "{$mainUser}:{$config['ftp_pass']}";
 
-        $daUrl = "https://{$daHost}:{$daPort}/CMD_API_DATABASES";
+        $daUrl = "https://{$daHost}:{$daPort}/CMD_API_DB_USER";
         $modifyData = [
-            'action' => 'passwd',
-            'db' => $mainUser . '_' . $dbSuffix,
+            'action' => 'modify',
+            'name' => $mainUser . '_' . $dbSuffix,
             'user' => $mainUser . '_' . $dbSuffix,
             'passwd' => $dbPass,
             'passwd2' => $dbPass
@@ -590,10 +703,132 @@ class DeploymentService
         $res = RemoteClient::post($daUrl, $modifyData, $auth);
         
         if (strpos($res, 'error:0A00010B') !== false || strpos($res, 'wrong version number') !== false) {
-            $daUrl = "http://{$daHost}:{$daPort}/CMD_API_DATABASES";
+            $daUrl = "http://{$daHost}:{$daPort}/CMD_API_DB_USER";
             $res = RemoteClient::post($daUrl, $modifyData, $auth);
         }
         
         return $res;
+    }
+
+    public function directAdminDbExists($config, $dbSuffix)
+    {
+        $daPort = $config['da_port'] ?? '1111';
+        $daHost = $config['ftp_host'];
+        $mainUser = !empty($config['da_user']) ? $config['da_user'] : $config['ftp_user'];
+        $auth = "{$mainUser}:{$config['ftp_pass']}";
+
+        $daUrl = "https://{$daHost}:{$daPort}/CMD_API_DATABASES";
+        $res = RemoteClient::get($daUrl, $auth);
+        
+        $isError = ($res === false || strpos((string)$res, 'error:0A00010B') !== false || strpos((string)$res, 'wrong version number') !== false || strpos((string)$res, 'TLS') !== false);
+        if ($isError) {
+            $daUrl = "http://{$daHost}:{$daPort}/CMD_API_DATABASES";
+            $res = RemoteClient::get($daUrl, $auth);
+        }
+
+        $dbName = strtolower($mainUser . '_' . $dbSuffix);
+        
+        $databases = [];
+        if (is_string($res) && !empty($res)) {
+            // Method 1: Use regex to parse list[] values to avoid max_input_vars limitations with parse_str
+            preg_match_all('/list(?:%5B%5D|\[\])=([^&]+)/i', $res, $matches);
+            if (!empty($matches[1])) {
+                foreach ($matches[1] as $db) {
+                    $databases[] = strtolower(urldecode(trim($db)));
+                }
+            }
+            // Method 2: Fallback parse_str in case the response format is different
+            if (empty($databases)) {
+                parse_str($res, $output);
+                if (isset($output['list']) && is_array($output['list'])) {
+                    $databases = array_map('strtolower', $output['list']);
+                }
+            }
+        }
+        
+        return in_array($dbName, $databases);
+    }
+
+    public function downloadRemoteEnv($config, $remoteProjectFolder)
+    {
+        $ftpRoot = !empty($config['ftp_root']) ? $config['ftp_root'] : '/public_html';
+        $ftpUrl = "ftp://{$config['ftp_host']}" . rtrim($ftpRoot, '/') . '/' . ltrim($remoteProjectFolder, '/') . '/.env';
+        $userPwd = "{$config['ftp_user']}:{$config['ftp_pass']}";
+        
+        $tempFile = tempnam(sys_get_temp_dir(), 'env_');
+        
+        $fp = fopen($tempFile, 'w');
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $ftpUrl);
+        curl_setopt($ch, CURLOPT_USERPWD, $userPwd);
+        curl_setopt($ch, CURLOPT_FILE, $fp);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+        
+        $res = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        fclose($fp);
+        
+        if ($res && $httpCode === 200) {
+            $content = file_get_contents($tempFile);
+            @unlink($tempFile);
+            return $content;
+        }
+        @unlink($tempFile);
+        return false;
+    }
+
+    public function getDbPassFromEnvContent($content)
+    {
+        if (empty($content)) return null;
+        $lines = explode("\n", str_replace(["\r\n", "\r"], "\n", $content));
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if (!$line || $line[0] === '#') continue;
+            if (strpos($line, '=') === false) continue;
+            $parts = explode('=', $line, 2);
+            $key = strtoupper(trim($parts[0]));
+            $val = trim($parts[1]);
+            $val = trim($val, " \t\n\r\0\x0B\"'");
+            if (in_array($key, ['DB_PASSWORD', 'DB_PASS', 'DATABASE_PASS', 'DATABASE_PASSWORD'])) {
+                return $val;
+            }
+        }
+        return null;
+    }
+
+    public function checkRemoteDbStatus($config, $dbName, $dbUser, $dbPass, $subPath = '', $bridgeName = 'bridge.php')
+    {
+        $cleanHost = !empty($config['web_domain'])
+            ? str_replace(['https://', 'http://', '/'], '', $config['web_domain'])
+            : str_replace(['ftp.', 'www.'], '', $config['ftp_host']);
+
+        $useSSL = !empty($config['ssl']) || (isset($config['web_domain']) && strpos($config['web_domain'], 'https://') === 0);
+        $schemes = $useSSL ? ['https://', 'http://'] : ['http://', 'https://'];
+        $res = null;
+        $webSub = (isset($config['ftp_root']) && strpos($config['ftp_root'], '/public_html') !== false) ? str_replace('/public_html', '', $config['ftp_root']) : '';
+        $fullSubPath = rtrim($webSub, '/') . '/' . trim($subPath, '/');
+
+        foreach ($schemes as $scheme) {
+            $pathPart = trim($fullSubPath, '/');
+            $url = $scheme . $cleanHost . ($pathPart ? '/' . $pathPart : '') . "/" . $bridgeName . "?action=checkDb";
+            
+            $dbToPass = [
+                'host' => 'localhost',
+                'name' => $dbName,
+                'user' => $dbUser,
+                'pass' => $dbPass
+            ];
+            
+            $res = RemoteClient::post($url, [
+                'db_config' => json_encode($dbToPass)
+            ]);
+            
+            $decoded = json_decode($res, true);
+            if ($decoded && isset($decoded['status'])) return $decoded;
+        }
+        return ['status' => 'error', 'message' => 'Không thể kết nối tới Bridge hoặc phản hồi không hợp lệ: ' . strip_tags((string)$res)];
     }
 }

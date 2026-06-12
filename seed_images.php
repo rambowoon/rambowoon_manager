@@ -358,6 +358,65 @@ YÊU CẦU QUAN TRỌNG:
             return $data;
         };
 
+        // Helper function to fetch category names from Gemini
+        $getAiCategoriesFromGemini = function(string $apiKey, string $model, string $prompt, string $subTypeTitle, string $level, int $count) {
+            $url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=" . urlencode($apiKey);
+            
+            $promptText = "Hãy tạo một JSON array chứa đúng $count tên danh mục cấp '$level' bằng tiếng Việt, phù hợp với ngành nghề/mô tả sau: '$prompt' (dành cho loại đối tượng: '$subTypeTitle').
+Yêu cầu:
+1. Các tên danh mục phải thực tế, đa dạng, ngắn gọn (2-5 từ) và KHÔNG trùng lặp.
+2. Chỉ phản hồi nội dung là một chuỗi JSON array các chuỗi (string) đại diện cho tên danh mục. Ví dụ: [\"Tên danh mục 1\", \"Tên danh mục 2\"]
+3. KHÔNG giải thích, KHÔNG viết bất kỳ chữ nào khác ngoài JSON array.";
+
+            $payload = json_encode([
+                "contents" => [
+                    ["parts" => [["text" => $promptText]]]
+                ],
+                "generationConfig" => [
+                    "responseMimeType" => "application/json"
+                ]
+            ]);
+
+            $ch = curl_init($url);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
+            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+            
+            $response = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $err = curl_error($ch);
+            curl_close($ch);
+
+            if ($err) {
+                throw new Exception("Lỗi kết nối cURL tới Gemini: " . $err);
+            }
+
+            if ($httpCode !== 200) {
+                $resObj = json_decode($response, true);
+                $errMsg = $resObj['error']['message'] ?? "HTTP Code $httpCode";
+                throw new Exception("Lỗi từ Gemini API khi tạo danh mục ($model): " . $errMsg);
+            }
+
+            $resObj = json_decode($response, true);
+            $text = $resObj['candidates'][0]['content']['parts'][0]['text'] ?? '';
+            $text = trim($text);
+            
+            if (str_starts_with($text, '```')) {
+                $text = preg_replace('/^```(?:json)?\s+|\s+```$/', '', $text);
+                $text = trim($text);
+            }
+            
+            $data = json_decode($text, true);
+            if (!is_array($data)) {
+                throw new Exception("Phản hồi từ Gemini cho danh mục không phải là JSON array.");
+            }
+            
+            return $data;
+        };
+
         $pdo->beginTransaction();
         try {
             foreach ($selectedSubs as $subKey => $imageFiles) {
@@ -498,12 +557,35 @@ YÊU CẦU QUAN TRỌNG:
 
                         $needed = $seedCatCount - count($existingIds);
 
+                        $aiCatData = [];
+                        if ($useAiText) {
+                            $apiKey = trim($globalConfig['gemini_key'] ?? '');
+                            if ($apiKey !== '' && $apiKey !== 'YOUR_GEMINI_API_KEY') {
+                                $prompt = $aiPromptExtra !== '' ? $aiPromptExtra : ($raw['title_main'] ?? $subKey);
+                                $subTypeTitle = $raw['title_main'] ?? $subKey;
+                                try {
+                                    $aiCatData = $getAiCategoriesFromGemini($apiKey, $aiModel, $prompt, $subTypeTitle, $level, $needed);
+                                } catch (\Throwable $catErr) {
+                                    $report['errors'][] = "Lỗi sinh danh mục AI cấp {$level}: " . $catErr->getMessage();
+                                }
+                            }
+                        }
+
                         for ($cIdx = 0; $cIdx < $needed; $cIdx++) {
                             $parentVal = !empty($parents) ? $parents[$cIdx % count($parents)] : 0;
                             
-                            $catPrompt = ($useAiText && $aiPromptExtra !== '') ? $aiPromptExtra : ($raw['title_main'] ?? $subKey);
-                            $nameVal = $catPrompt . ' Danh Mục ' . ucfirst($level) . ' ' . (count($existingIds) + $cIdx + 1);
+                            $nameVal = '';
+                            if (!empty($aiCatData) && isset($aiCatData[$cIdx]) && trim($aiCatData[$cIdx]) !== '') {
+                                $nameVal = trim($aiCatData[$cIdx]);
+                            }
+                            if ($nameVal === '') {
+                                $catPrompt = ($useAiText && $aiPromptExtra !== '') ? $aiPromptExtra : ($raw['title_main'] ?? $subKey);
+                                $nameVal = $catPrompt . ' Danh Mục ' . ucfirst($level) . ' ' . (count($existingIds) + $cIdx + 1);
+                            }
                             $slugVal = $makeSlug($nameVal);
+                            if ($useAiText && !empty($aiCatData) && isset($aiCatData[$cIdx]) && trim($aiCatData[$cIdx]) !== '') {
+                                $slugVal .= '-' . (count($existingIds) + $cIdx + 1);
+                            }
 
                             $cols = [$typeCol];
                             $vals = [$typeVal];
@@ -718,6 +800,9 @@ YÊU CẦU QUAN TRỌNG:
 
                     if ($hasSlug && $nameViVal !== '') {
                         $slugViVal = $makeSlug($nameViVal);
+                        if ($useAiText && $aiName !== '') {
+                            $slugViVal .= '-' . ($existingCount + $i + 1);
+                        }
                         if (in_array('slugvi', $columns)) { $cols[] = 'slugvi'; $vals[] = $slugViVal; }
                         if (in_array('slugen', $columns)) { $cols[] = 'slugen'; $vals[] = $slugViVal; }
                     }

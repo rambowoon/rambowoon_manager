@@ -193,6 +193,18 @@ const App = {
 				await this.saveConfig(true);
 			});
 		}
+
+		const packUploadCheck = document.getElementById('pre_deploy_pack_upload');
+		if (packUploadCheck) {
+			packUploadCheck.addEventListener('change', (e) => {
+				const use7zipCheck = document.getElementById('pre_deploy_use_7zip');
+				if (use7zipCheck) {
+					use7zipCheck.disabled = !e.target.checked;
+					if (!e.target.checked) use7zipCheck.checked = false;
+					else use7zipCheck.checked = true;
+				}
+			});
+		}
 	},
 
 	async showGlobalConfig() {
@@ -338,12 +350,77 @@ const App = {
 		await this._deployFlow(name, 'deploy', this.currentCategory);
 	},
 
+	async handleDeployDemo(name, category, options) {
+		UI.showModal('deploy-modal');
+		UI.updateDeployStatus('Đang kiểm tra...', 10, 'Đang xác minh Database trên DirectAdmin...');
+		
+		try {
+			const checkRes = await (await fetch('api.php?action=preCheckDeployDemo', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ name, category, manual_db_suffix: options.manual_db_suffix })
+			})).json();
+			
+			if (checkRes.status === 'error') {
+				UI.updateDeployStatus('Lỗi!', 10, `<span style="color:var(--danger)">❌ ${checkRes.message}</span>`);
+				document.getElementById('deploy-footer').style.display = 'flex';
+				return;
+			}
+			
+			const dbPass = checkRes.db_pass;
+			const passwordUpdated = !!checkRes.password_updated;
+			
+			if (checkRes.action === 'prompt_confirm') {
+				UI.hideModal('deploy-modal');
+				
+				document.getElementById('db-confirm-message').innerText = `Database '${name}' đã tồn tại trên demo và đang chứa dữ liệu.`;
+				UI.showModal('deploy-db-confirm-modal');
+				
+				document.getElementById('btn-db-overwrite').onclick = async () => {
+					UI.hideModal('deploy-db-confirm-modal');
+					await this._deployFlow(name, 'deployDemo', category, {
+						...options,
+						clear_db: 1,
+						db_pass: dbPass,
+						password_updated: passwordUpdated
+					});
+				};
+				
+				document.getElementById('btn-db-skip').onclick = async () => {
+					UI.hideModal('deploy-db-confirm-modal');
+					await this._deployFlow(name, 'deployDemo', category, {
+						...options,
+						export_upload: false, // Bỏ qua import database
+						create_db: false, // Không cần tạo lại
+						clear_db: 0,
+						db_pass: dbPass,
+						password_updated: passwordUpdated
+					});
+				};
+			} else {
+				UI.hideModal('deploy-modal');
+				await this._deployFlow(name, 'deployDemo', category, {
+					...options,
+					clear_db: 0,
+					db_pass: dbPass,
+					password_updated: passwordUpdated
+				});
+			}
+		} catch (err) {
+			UI.updateDeployStatus('Lỗi kết nối!', 10, `<span style="color:var(--danger)">❌ Không thể kết nối tới API kiểm tra.</span>`);
+			document.getElementById('deploy-footer').style.display = 'flex';
+		}
+	},
+
 	async deployDemo(name, category) {
 		document.getElementById('pre-deploy-project-desc').innerText =
 			`Dự án: ${name} (${category})`;
 		document.getElementById('manual_db_suffix').value = '';
 		document.getElementById('pre_deploy_ssl').checked = false;
 		document.getElementById('pre_deploy_pack_upload').checked = true;
+		if (document.getElementById('pre_deploy_use_7zip')) {
+			document.getElementById('pre_deploy_use_7zip').checked = true;
+		}
 		document.getElementById('pre_deploy_export_upload').checked = true;
 		document.getElementById('pre_deploy_create_db').checked = true;
 		document.getElementById('pre_deploy_extract_setup').checked = true;
@@ -353,15 +430,16 @@ const App = {
 			const manualSuffix = document.getElementById('manual_db_suffix').value;
 			const useSSL = document.getElementById('pre_deploy_ssl').checked;
 			const packUpload = document.getElementById('pre_deploy_pack_upload').checked;
+			const use7zip = document.getElementById('pre_deploy_use_7zip') ? document.getElementById('pre_deploy_use_7zip').checked : true;
 			const exportUpload = document.getElementById('pre_deploy_export_upload').checked;
 			const createDb = document.getElementById('pre_deploy_create_db').checked;
 			const extractSetup = document.getElementById('pre_deploy_extract_setup').checked;
 			
 			UI.hideModal('pre-deploy-modal');
-			await this._deployFlow(name, 'deployDemo', category, {
+			await this.handleDeployDemo(name, category, {
 				manual_db_suffix: manualSuffix,
 				use_ssl: useSSL,
-				use_7zip: true,
+				use_7zip: use7zip,
 				pack_upload: packUpload,
 				export_upload: exportUpload,
 				create_db: createDb,
@@ -376,6 +454,9 @@ const App = {
 		document.getElementById('manual_db_suffix').value = '';
 		document.getElementById('pre_deploy_ssl').checked = false;
 		document.getElementById('pre_deploy_pack_upload').checked = false;
+		if (document.getElementById('pre_deploy_use_7zip')) {
+			document.getElementById('pre_deploy_use_7zip').checked = false;
+		}
 		document.getElementById('pre_deploy_export_upload').checked = true;
 		document.getElementById('pre_deploy_create_db').checked = true;
 		document.getElementById('pre_deploy_extract_setup').checked = true;
@@ -385,15 +466,16 @@ const App = {
 			const manualSuffix = document.getElementById('manual_db_suffix').value;
 			const useSSL = document.getElementById('pre_deploy_ssl').checked;
 			const packUpload = document.getElementById('pre_deploy_pack_upload').checked;
+			const use7zip = document.getElementById('pre_deploy_use_7zip') ? document.getElementById('pre_deploy_use_7zip').checked : false;
 			const exportUpload = document.getElementById('pre_deploy_export_upload').checked;
 			const createDb = document.getElementById('pre_deploy_create_db').checked;
 			const extractSetup = document.getElementById('pre_deploy_extract_setup').checked;
 			
 			UI.hideModal('pre-deploy-modal');
-			await this._deployFlow(name, 'deployDemo', category, {
+			await this.handleDeployDemo(name, category, {
 				manual_db_suffix: manualSuffix,
 				use_ssl: useSSL,
-				use_7zip: true,
+				use_7zip: use7zip,
 				pack_upload: packUpload,
 				export_upload: exportUpload,
 				create_db: createDb,

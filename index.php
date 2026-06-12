@@ -840,6 +840,11 @@
                     <input type="checkbox" id="pre_deploy_pack_upload" style="width:18px; height:18px; accent-color:var(--primary);" checked> Nén & Tải mã nguồn lên Host (dist.zip)
                 </label>
             </div>
+            <div class="form-group" style="margin-top: 5px; margin-left: 26px;">
+                <label style="display:flex; align-items:center; gap:8px; text-transform:none; cursor:pointer; color:#ccc; font-weight:normal; font-size:0.85rem;">
+                    <input type="checkbox" id="pre_deploy_use_7zip" style="width:16px; height:16px; accent-color:var(--primary);" checked> Sử dụng nén bằng 7-Zip (Bỏ check sẽ nén bằng Tar/PHP)
+                </label>
+            </div>
             <div class="form-group" style="margin-top: 10px;">
                 <label style="display:flex; align-items:center; gap:8px; text-transform:none; cursor:pointer; color:#fff; font-weight:normal;">
                     <input type="checkbox" id="pre_deploy_export_upload" style="width:18px; height:18px; accent-color:var(--primary);" checked> Xuất & Tải Database lên Host (dist.sql)
@@ -1208,6 +1213,29 @@ Pass: password123..." style="height:200px;"></textarea>
             <div class="modal-footer-actions">
                 <button class="btn btn-ghost" onclick="UI.hideModal('seed-ai-modal')">Hủy</button>
                 <button id="seed-ai-confirm-btn" class="btn btn-primary" onclick="SeedManager.runSeed(true)">🚀 Bắt đầu tạo bằng AI</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODAL: DEPLOY DB CONFIRM -->
+    <div id="deploy-db-confirm-modal" class="modal-overlay" style="z-index: 10005;">
+        <div class="modal" style="max-width: 450px;">
+            <div class="modal-header-flex">
+                <h2>⚠️ Database đã có dữ liệu</h2>
+                <button class="btn-close-circle" onclick="UI.hideModal('deploy-db-confirm-modal')">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <div class="modal-body" style="padding: 20px 0;">
+                <p id="db-confirm-message" style="font-size:0.9rem; color:#fff; line-height:1.5; margin-bottom:15px;"></p>
+                <p style="font-size:0.8rem; color:var(--muted); line-height:1.4;">
+                    Vui lòng chọn một trong hai hành động dưới đây để tiếp tục tiến trình triển khai.
+                </p>
+            </div>
+            <div class="modal-footer-actions" style="display:flex; flex-direction:column; gap:10px;">
+                <button id="btn-db-overwrite" class="btn btn-primary" style="width:100%; justify-content:center; background:var(--danger); border-color:var(--danger);">💥 Xoá hết dữ liệu cũ &amp; Import mới</button>
+                <button id="btn-db-skip" class="btn btn-ghost" style="width:100%; justify-content:center; color:#fff; background:rgba(255,255,255,0.05);">⏭️ Giữ lại dữ liệu cũ &amp; Bỏ qua import</button>
+                <button class="btn btn-ghost" onclick="UI.hideModal('deploy-db-confirm-modal')" style="width:100%; justify-content:center;">Hủy</button>
             </div>
         </div>
     </div>

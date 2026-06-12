@@ -389,6 +389,190 @@ switch ($action) {
         }
         break;
 
+    case 'preCheckDeployDemo':
+        $data = json_decode(file_get_contents('php://input'), true);
+        $projectName = $data['name'] ?? '';
+        $category = $data['category'] ?? '';
+        $manualSuffix = $data['manual_db_suffix'] ?? null;
+
+        if (!$projectName || !$category) {
+            echo json_encode(['status' => 'error', 'message' => 'Thiếu thông tin dự án hoặc danh mục']);
+            break;
+        }
+
+        $projectConfig = $configManager->getForProject($projectName);
+        if (!$projectConfig) {
+            echo json_encode(['status' => 'error', 'message' => 'Dự án chưa cấu hình']);
+            break;
+        }
+
+        $config = file_exists(__DIR__ . '/data/demo_config.json') ? json_decode(file_get_contents(__DIR__ . '/data/demo_config.json'), true) : null;
+        if (!$config) {
+            echo json_encode(['status' => 'error', 'message' => 'Cấu hình chung chưa thiết lập']);
+            break;
+        }
+
+        $projects = $scanner->getProjects($category);
+        $project = null;
+        foreach ($projects as $p) { if ($p['name'] === $projectName) { $project = $p; break; } }
+        if (!$project) {
+            echo json_encode(['status' => 'error', 'message' => 'Dự án không tồn tại']);
+            break;
+        }
+
+        $dbSuffix = $deployService->generateDemoDbName($project['category'], $projectName, $manualSuffix);
+        $mainUser = !empty($config['da_user']) ? $config['da_user'] : $config['ftp_user'];
+        $dbName = $mainUser . '_' . $dbSuffix;
+
+        // 1. Kiểm tra database, user có tồn tại không
+        $dbExists = false;
+        try {
+            $dbExists = $deployService->directAdminDbExists($config, $dbSuffix);
+        } catch (\Exception $e) {
+            echo json_encode(['status' => 'error', 'message' => 'Lỗi kết nối DirectAdmin: ' . $e->getMessage()]);
+            break;
+        }
+
+        if (!$dbExists) {
+            echo json_encode([
+                'status' => 'success',
+                'action' => 'proceed',
+                'db_pass' => '',
+                'message' => 'Database chưa tồn tại, tiến hành tạo mới.',
+                'debug' => [
+                    'db_exists' => $dbExists,
+                    'db_name' => $dbName
+                ]
+            ]);
+            break;
+        }
+
+        // Database đã tồn tại!
+        // 2. Kiểm tra xem có file env trên demo không
+        $envExists = false;
+        $relPath = $project['relPath'];
+        try {
+            $envExists = $deployService->remoteFileExists($config, $relPath . '/.env');
+        } catch (\Exception $e) {}
+
+        $dbPass = null;
+        if ($envExists) {
+            // 3. Đọc pass từ file env trên demo
+            try {
+                $remoteEnvContent = $deployService->downloadRemoteEnv($config, $relPath);
+                $dbPass = $deployService->getDbPassFromEnvContent($remoteEnvContent);
+            } catch (\Exception $e) {}
+        }
+
+        // Lấy pass dự phòng
+        $targetPass = '';
+        $localEnvPath = $project['path'] . '/.env';
+        if (file_exists($localEnvPath)) {
+            $lines = file($localEnvPath);
+            foreach ($lines as $line) {
+                $trimmedLine = trim($line);
+                if (strpos($trimmedLine, 'DB_PASSWORD=') === 0) {
+                    $targetPass = trim(substr($trimmedLine, 12));
+                } elseif (strpos($trimmedLine, 'DB_PASS=') === 0) {
+                    $targetPass = trim(substr($trimmedLine, 8));
+                }
+            }
+            $targetPass = trim($targetPass, " \t\n\r\0\x0B\"'");
+        }
+
+        if (empty($targetPass)) {
+            $targetPass = $projectConfig['deployed']['demo']['db_pass'] ?? '';
+        }
+
+        if (empty($targetPass)) {
+            $targetPass = 'Pw' . substr(str_shuffle('abcdefghjkmnpqrstuvwxyz23456789'), 0, 10) . substr(str_shuffle('ABCDEFGHJKLMNPQRSTUVWXYZ'), 0, 2);
+        }
+
+        if (empty($dbPass)) {
+            $dbPass = $targetPass;
+        }
+
+        // Tải bridge.php lên trước để kiểm tra kết nối localhost
+        try {
+            $deployService->upload($config, ['bridge.php' => __DIR__ . '/bridge.php'], $relPath);
+        } catch (\Exception $e) {
+            echo json_encode(['status' => 'error', 'message' => 'Không thể upload Bridge để kiểm tra Database: ' . $e->getMessage()]);
+            break;
+        }
+
+        // 4. Check xem đăng nhập bằng $dbPass được không
+        $checkRes = $deployService->checkRemoteDbStatus($config, $dbName, $dbName, $dbPass, $relPath);
+        $connected = ($checkRes['status'] === 'success');
+        $passwordUpdated = false;
+
+        if (!$connected) {
+            // 5. Nếu không đăng nhập được, đổi mật khẩu trên DirectAdmin thành $targetPass
+            if (!empty($targetPass)) {
+                try {
+                    $deployService->changeDirectAdminDbPassword($config, $dbSuffix, $targetPass);
+                    $dbPass = $targetPass;
+                    // Chờ DirectAdmin cập nhật và thử kết nối lại
+                    sleep(2);
+                    $checkRes = $deployService->checkRemoteDbStatus($config, $dbName, $dbName, $dbPass, $relPath);
+                    $connected = ($checkRes['status'] === 'success');
+                    if ($connected) {
+                        $passwordUpdated = true;
+                    }
+                } catch (\Exception $e) {
+                    echo json_encode(['status' => 'error', 'message' => 'Đổi mật khẩu Database thất bại: ' . $e->getMessage()]);
+                    break;
+                }
+            }
+        }
+
+        if (!$connected) {
+            echo json_encode(['status' => 'error', 'message' => 'Database đã tồn tại nhưng không thể kết nối hoặc cập nhật mật khẩu mới: ' . ($checkRes['message'] ?? 'Lỗi không xác định')]);
+            break;
+        }
+
+        // Cập nhật lại mật khẩu đúng vào project config để lưu vết
+        if (!isset($projectConfig['deployed']['demo'])) $projectConfig['deployed']['demo'] = [];
+        $projectConfig['deployed']['demo']['db_pass'] = $dbPass;
+        $configManager->save($projectName, $projectConfig);
+
+        // 6. Kiểm tra xem database đã có dữ liệu hay chưa
+        $hasData = !empty($checkRes['has_data']);
+
+        if ($hasData) {
+            echo json_encode([
+                'status' => 'success',
+                'action' => 'prompt_confirm',
+                'db_pass' => $dbPass,
+                'password_updated' => $passwordUpdated,
+                'message' => 'Database đã tồn tại và đang chứa dữ liệu.',
+                'debug' => [
+                    'db_exists' => $dbExists,
+                    'env_exists' => $envExists,
+                    'db_name' => $dbName,
+                    'connected' => $connected,
+                    'has_data' => $hasData,
+                    'check_res' => $checkRes
+                ]
+            ]);
+        } else {
+            echo json_encode([
+                'status' => 'success',
+                'action' => 'proceed',
+                'db_pass' => $dbPass,
+                'password_updated' => $passwordUpdated,
+                'message' => 'Database đã kết nối thành công và chưa có dữ liệu.',
+                'debug' => [
+                    'db_exists' => $dbExists,
+                    'env_exists' => $envExists,
+                    'db_name' => $dbName,
+                    'connected' => $connected,
+                    'has_data' => $hasData,
+                    'check_res' => $checkRes
+                ]
+            ]);
+        }
+        break;
+
     case 'deploy':
     case 'deployDemo':
         $data = readJsonInput();
@@ -417,6 +601,7 @@ switch ($action) {
         // Cập nhật cấu hình SSL từ tham số truyền lên hoặc từ cấu hình cũ
         $useSSL = isset($data['use_ssl']) ? (bool)$data['use_ssl'] : (!empty($projectConfig['demo']['ssl']) || !empty($projectConfig['prod']['ssl']));
         $config['ssl'] = $useSSL;
+        $config['clear_db'] = !empty($data['clear_db']) ? 1 : 0;
         
         // Đồng bộ SSL vào cấu hình dự án
         if (!isset($projectConfig['demo'])) $projectConfig['demo'] = [];
@@ -456,12 +641,18 @@ switch ($action) {
                 $localEnvPass = trim($localEnvPass, " \t\n\r\0\x0B\"'");
             }
 
-            if (!empty($localEnvPass)) {
+            if (!empty($data['db_pass'])) {
+                $dbPass = trim($data['db_pass']);
+            } elseif (!empty($localEnvPass)) {
                 $dbPass = $localEnvPass;
             } else {
-                $dbPass = $projectConfig['deployed']['demo']['db_pass'] ?? ('pw' . substr(str_shuffle('abcdefghjkmnpqrstuvwxyz23456789'), 0, 10));
+                $dbPass = $projectConfig['deployed']['demo']['db_pass'] ?? ('Pw' . substr(str_shuffle('abcdefghjkmnpqrstuvwxyz23456789'), 0, 18) . substr(str_shuffle('ABCDEFGHJKLMNPQRSTUVWXYZ'), 0, 2));
             }
             $config['db_pass'] = $dbPass;
+
+            if (!empty($data['password_updated'])) {
+                writeJobLog($jobId, ['status' => 'info', 'log' => '🔄 Đã tự động đồng bộ lại mật khẩu mới của Database trên DirectAdmin.']);
+            }
 
             if ($createDb) {
                 writeJobLog($jobId, ['status' => 'info', 'log' => '🛠️ Khởi tạo Database trên DirectAdmin...']);
@@ -525,12 +716,13 @@ switch ($action) {
             // Auto-heal DB password mismatch
             if ($isDemo && (!$decoded || $decoded['status'] !== 'success')) {
                 $errMsg = $decoded['message'] ?? $res;
-                $isAccessDenied = (stripos($errMsg, 'Access denied') !== false || stripos($errMsg, '1045') !== false);
+                $isAccessDenied = (stripos($errMsg, 'Access denied') !== false || stripos($errMsg, '1045') !== false || stripos($errMsg, 'DB_CONNECTION_FAIL') !== false);
                 if ($isAccessDenied) {
                     writeJobLog($jobId, ['status' => 'info', 'log' => '⚠️ Sai mật khẩu Database! Đang tự động cập nhật lại mật khẩu trên DirectAdmin theo file env...']);
                     try {
                         $daRes = $deployService->changeDirectAdminDbPassword($config, $dbSuffix, $dbPass);
-                        writeJobLog($jobId, ['status' => 'info', 'log' => '🔄 Đã cập nhật xong mật khẩu mới trên DirectAdmin. Đang thử kết nối lại...']);
+                        writeJobLog($jobId, ['status' => 'info', 'log' => '🔄 DirectAdmin API phản hồi: ' . strip_tags(urldecode((string)$daRes))]);
+                        writeJobLog($jobId, ['status' => 'info', 'log' => '🔄 Đang thử kết nối lại...']);
                         
                         // Sleep to allow DirectAdmin propagation
                         sleep(2);
@@ -565,6 +757,9 @@ switch ($action) {
             ];
             
             if ($isDemo) $projectConfig['lock_demo'] = true;
+            if (!empty($data['password_updated'])) {
+                $configManager->addHistory($projectName, 'Đồng bộ mật khẩu DB', 'Tự động cập nhật mật khẩu mới thành công');
+            }
             $configManager->save($projectName, $projectConfig);
             $configManager->addHistory($projectName, 'Deploy ' . ($isDemo ? 'Demo' : 'Production'), 'Thành công');
 

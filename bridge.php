@@ -256,17 +256,19 @@ class RamboWoonBridge
                         $this->clearDatabase($dbConfig);
                     }
 
-                    // Auto-replace Demo Domain with Production Domain in SQL file
+                    // Prepend lock timeout & disable foreign keys, and perform domain replacement
+                    $sqlContent = file_exists($sqlFile) ? file_get_contents($sqlFile) : '';
+                    $prefixSql = "SET SESSION lock_wait_timeout = 5;\nSET FOREIGN_KEY_CHECKS = 0;\n";
+
                     if (!empty($appConfig['demo_domain']) && !empty($appConfig['prod_domain'])) {
                         $demoDom = trim($appConfig['demo_domain'], '/');
                         $prodDom = trim($appConfig['prod_domain'], '/');
                         if ($demoDom !== $prodDom) {
-                            $sqlContent = file_get_contents($sqlFile);
                             $sqlContent = str_ireplace($demoDom, $prodDom, $sqlContent);
-                            file_put_contents($sqlFile, $sqlContent);
                             $results[] = "Domain mapping applied to SQL: $demoDom -> $prodDom";
                         }
                     }
+                    file_put_contents($sqlFile, $prefixSql . $sqlContent);
 
                     $hasExec = function_exists('exec');
 
@@ -288,18 +290,16 @@ class RamboWoonBridge
                     }
 
                     if (!$isSqlSuccess) {
-                        // METHOD 2: PDO Fallback
+                        // METHOD 2: PDO Fallback (Stream import to prevent memory and timeout issues)
                         $pdo = $this->getPdoConnection($dbConfig);
                         $pdo->exec("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci';");
                         $pdo->exec("SET CHARACTER SET utf8mb4;");
-                        $sql = file_get_contents($sqlFile);
-
-
-                        $pdo->exec("SET FOREIGN_KEY_CHECKS=0;");
-                        $pdo->exec($sql);
-                        $pdo->exec("SET FOREIGN_KEY_CHECKS=1;");
-                        $results[] = "DB imported successfully via PDO ($sqlSize bytes)";
-                        $isSqlSuccess = true;
+                        if ($this->importSqlFileViaPdo($pdo, $sqlFile)) {
+                            $results[] = "Database imported successfully via streaming PDO ($sqlSize bytes)";
+                            $isSqlSuccess = true;
+                        } else {
+                            throw new \Exception("Streaming PDO SQL import failed");
+                        }
                     }
 
                     // 4. Update Setting Table (Email config)
@@ -310,6 +310,10 @@ class RamboWoonBridge
                     $results[] = "Database Import SUCCESS.";
                 } catch (\Exception $e) {
                     $results[] = "DB Error: " . $e->getMessage();
+                    $isAccessDenied = (stripos($e->getMessage(), 'Access denied') !== false || stripos($e->getMessage(), '1045') !== false);
+                    if ($isAccessDenied) {
+                        die(json_encode(['status' => 'error', 'message' => 'DB_CONNECTION_FAIL: ' . $e->getMessage(), 'logs' => $results]));
+                    }
                 }
             } else {
                 $results[] = "DB Import: $sqlFile is empty (0 bytes)";
@@ -416,12 +420,16 @@ class RamboWoonBridge
                 PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
                 PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'"
             ];
-            return new PDO("mysql:host={$host};dbname={$dbname};charset=utf8mb4", $user, $pass, $options);
+            $pdo = new PDO("mysql:host={$host};dbname={$dbname};charset=utf8mb4", $user, $pass, $options);
+            $pdo->exec("SET SESSION lock_wait_timeout = 5;");
+            return $pdo;
         } catch (PDOException $e) {
             $msg = $e->getMessage();
             if (strpos($msg, '2002') !== false || strpos($msg, 'No such file or directory') !== false) {
                 try {
-                    return new PDO("mysql:host=127.0.0.1;dbname={$dbname};charset=utf8mb4", $user, $pass, $options);
+                    $pdo = new PDO("mysql:host=127.0.0.1;dbname={$dbname};charset=utf8mb4", $user, $pass, $options);
+                    $pdo->exec("SET SESSION lock_wait_timeout = 5;");
+                    return $pdo;
                 } catch (PDOException $e2) {
                     throw new Exception("DEBUG_BRIDGE: Localhost & 127.0.0.1 failed. Error 1: {$msg}. Error 2: " . $e2->getMessage());
                 }
@@ -639,6 +647,11 @@ class RamboWoonBridge
                 $this->clearDatabase($dbConfig);
             }
 
+            // Prepend lock timeout & disable foreign keys to prevent hangs
+            $sqlContent = file_exists($sqlFile) ? file_get_contents($sqlFile) : '';
+            $prefixSql = "SET SESSION lock_wait_timeout = 5;\nSET FOREIGN_KEY_CHECKS = 0;\n";
+            file_put_contents($sqlFile, $prefixSql . $sqlContent);
+
             if (function_exists('exec')) {
                 $outM = $resM = null;
                 @exec('mysql --version 2>&1', $outM, $resM);
@@ -659,12 +672,12 @@ class RamboWoonBridge
                 $pdo = $this->getPdoConnection($dbConfig);
                 $pdo->exec("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci';");
                 $pdo->exec("SET CHARACTER SET utf8mb4;");
-                $sql = file_get_contents($sqlFile);
-                $pdo->exec("SET FOREIGN_KEY_CHECKS=0;");
-                $pdo->exec($sql);
-                $pdo->exec("SET FOREIGN_KEY_CHECKS=1;");
-                $results[] = "Database imported successfully via PDO";
-                $isSqlSuccess = true;
+                if ($this->importSqlFileViaPdo($pdo, $sqlFile)) {
+                    $results[] = "Database imported successfully via streaming PDO";
+                    $isSqlSuccess = true;
+                } else {
+                    throw new \Exception("Streaming PDO SQL import failed");
+                }
             }
         } catch (\Exception $e) {
             die(json_encode(['status' => 'error', 'message' => 'Lỗi import DB: ' . $e->getMessage(), 'logs' => $results]));
@@ -732,6 +745,39 @@ class RamboWoonBridge
         } catch (\Exception $e) {
             return false;
         }
+    }
+
+    private function importSqlFileViaPdo($pdo, $sqlFile)
+    {
+        if (!file_exists($sqlFile)) return false;
+        
+        $fp = fopen($sqlFile, 'r');
+        if (!$fp) return false;
+        
+        $query = '';
+        $pdo->exec("SET FOREIGN_KEY_CHECKS=0;");
+        $pdo->exec("SET SESSION lock_wait_timeout = 5;");
+        
+        while (($line = fgets($fp)) !== false) {
+            $trimmed = trim($line);
+            if (empty($trimmed) || strpos($trimmed, '--') === 0 || strpos($trimmed, '#') === 0 || strpos($trimmed, '/*') === 0) {
+                continue;
+            }
+            
+            $query .= $line;
+            
+            if (substr(rtrim($trimmed), -1) === ';') {
+                try {
+                    $pdo->exec($query);
+                } catch (\Exception $e) {
+                    // Fail silently or log
+                }
+                $query = '';
+            }
+        }
+        fclose($fp);
+        $pdo->exec("SET FOREIGN_KEY_CHECKS=1;");
+        return true;
     }
 
     private function clearFolderContent($dir)
