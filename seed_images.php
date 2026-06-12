@@ -697,9 +697,6 @@ YÊU CẦU QUAN TRỌNG:
                         $aiItem = $aiData[$i % count($aiData)];
                     }
                     $aiName = ($aiItem && !empty($aiItem['name'])) ? trim($aiItem['name']) : '';
-                    if ($aiName !== '') {
-                        $aiName .= ' ' . ($existingCount + $i + 1);
-                    }
 
                     if (!empty($raw['name'])) {
                         $nameVal = ($aiName !== '') ? $aiName : ($randomTitle(2) . ' ' . ($existingCount + $i + 1));
