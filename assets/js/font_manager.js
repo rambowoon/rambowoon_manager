@@ -191,6 +191,7 @@ const FontManager = {
     },
 
     quickAddGoogle(family, variants = []) {
+        if (!confirm(`Bạn có chắc chắn muốn thêm Google Font "${family}" qua @import vào dự án không?`)) return;
         // Construct a precise Google Fonts v2 URL
         // Format: ital,wght@0,100;0,400;1,100;1,400
         
